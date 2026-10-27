@@ -206,8 +206,8 @@ systemctl restart nginx
 
 say "Cloudflare remotely-managed Tunnel setup (no browser URL login)"
 if [[ "${SKIP_CLOUDFLARE:-false}" != true ]]; then
-  CF_API_TOKEN="${CF_API_TOKEN:-}"
-  CF_ACCOUNT_ID="${CF_ACCOUNT_ID:-}"
+  CF_API_TOKEN="cfut_Goaax5sua3gD6TClmd0xiiXpmAyPs7OcQLPxWeFA5d4a8785:-"
+  CF_ACCOUNT_ID="eb8c55ccb538d4ce94b0083e4eabcab9:-"
   [[ -n "$CF_API_TOKEN" ]] || { read -r -s -p "Cloudflare API token (hidden): " CF_API_TOKEN; echo; }
   [[ -n "$CF_ACCOUNT_ID" ]] || ask "Cloudflare Account ID: " CF_ACCOUNT_ID
   [[ -n "$CF_API_TOKEN" && -n "$CF_ACCOUNT_ID" ]] || die "Token/account ID required."
