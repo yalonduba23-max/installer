@@ -1,16 +1,17 @@
-# WebSocket VPN / SSH + Cloudflare Tunnel setup
+## Whate The Tool Does
+It installs a cloudflare tunnel and installs ssh-websocket vless and vmess vpn setup for use for vpn connection accross cloudflare Network Domains.
 
-Put `setup.sh` and your existing `w3bs0cket.py` in the same directory.
+# NOTE TO ONLY CONFIGURE YOUR REAL API KEYS ONCE YOU HAVE CLONED THE REPOSITORY IN YOUR LOCAL OR REMOTE PC .env FILE
 
-## Cloudflare API authentication without browser URL
-Yes. Use a scoped Cloudflare API token and Account ID. This script uses Cloudflare's API to create a remotely managed tunnel and retrieve its run token; it does not need `cloudflared tunnel login`. Create a token with:
+## Prepare your API KEYS
+ This script uses Cloudflare's API to create a remotely managed tunnel and retrieve its run token.
 - Account: Cloudflare Tunnel — Edit
 - Zone: Zone — Read
 - Zone: DNS — Edit
 
-Keep the token scoped to the required account/zone. Do not use the Global API Key.
++=>Keep the token scoped to the required account/zone. Do not use the Global API Key.
 
-## Configure and run
+## Configure and replace with your API KEYS
 ```bash
 cp .env.example .env
 chmod 600 .env
@@ -18,19 +19,6 @@ nano .env
 chmod +x setup.sh
 sudo bash setup.sh
 ```
-The script prompts you to choose an accessible zone, sequential/random tunnel naming, and a subdomain label. It stores the API token in `.env` if you choose to enter it there; the tunnel run token is stored root-only in `/etc/cloudflared/tunnel-token.env`.
-
-## Private GitHub repository
-Create an empty **private** repository on GitHub, then:
-```bash
-git init
-git add setup.sh .env.example .gitignore README.md w3bs0cket.py
-git commit -m "Add automated VPN tunnel setup"
-git branch -M main
-git remote add origin git@github.com:YOUR_ACCOUNT/YOUR_PRIVATE_REPO.git
-git push -u origin main
-```
-Never run `git add .env`. Verify with `git check-ignore .env`. A private repo is not a secrets vault: every collaborator can read committed secrets, and secrets remain in Git history. If a token is ever committed, revoke it and create another.
 
 ## Services and credentials
 - `service ssh start` is run and SSH is enabled at boot.
