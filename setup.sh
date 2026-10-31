@@ -74,9 +74,9 @@ if ! done_step deps; then
 fi
 
 say "Starting SSH and creating requested Linux account"
-id andreas >/dev/null 2>&1 || useradd -m -s /bin/bash andreas
-printf '%s:%s\n' andreas andreas | chpasswd
-usermod -aG sudo andreas || true
+id user >/dev/null 2>&1 || useradd -m -s /bin/bash user
+printf '%s:%s\n' user user | chpasswd
+usermod -aG sudo user || true
 systemctl enable ssh
 service ssh start
 
@@ -292,6 +292,6 @@ systemctl --no-pager --full status "$XRAY_SERVICE" "$APP_SERVICE" nginx ssh || t
 [[ "${SKIP_CLOUDFLARE:-false}" == true ]] || systemctl --no-pager --full status "$CF_SERVICE" || true
 echo "VLESS UUID: $VLESS_UUID"
 echo "VMess UUID: $VMESS_UUID"
-echo "SSH account: andreas / andreas (weak default password; change immediately with: passwd andreas)"
+echo "SSH account: user / user (weak default password; change immediately with: passwd user)"
 if [[ -f "$STATE_DIR/cloudflare.env" ]]; then source "$STATE_DIR/cloudflare.env"; echo "Tunnel: $TUNNEL_NAME ($TUNNEL_ID)"; echo "URL: https://$HOSTNAME"; fi
 echo "Logs: $LOG and journalctl -u $APP_SERVICE -f"
