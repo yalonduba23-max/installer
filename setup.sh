@@ -242,7 +242,7 @@ if [[ "${SKIP_CLOUDFLARE:-false}" != true ]]; then
   created="$(curl --fail --silent --show-error -X POST "${auth[@]}" --data "$payload" "$API/accounts/$CF_ACCOUNT_ID/cfd_tunnel")" || die "Tunnel create API failed."
   [[ "$(jq -r .success <<<"$created")" == true ]] || { jq .errors <<<"$created"; die "Tunnel create failed (name may already exist)."; }
   TUNNEL_ID="$(jq -r .result.id <<<"$created")"
-  token_result="$(curl --fail --silent --show-error "${auth[@]}" "$API/accounts/$CF_ACCOUNT_ID/cfd_tunnels/$TUNNEL_ID/token")" || die "Could not retrieve tunnel run token."
+  token_result="$(curl --fail --silent --show-error "${auth[@]}" "$API/accounts/$CF_ACCOUNT_ID/cfd_tunnel/$TUNNEL_ID/token")" || die "Could not retrieve tunnel run token."
   [[ "$(jq -r .success <<<"$token_result")" == true ]] || { jq .errors <<<"$token_result"; die "Tunnel token retrieval failed."; }
   TUNNEL_TOKEN="$(jq -r .result <<<"$token_result")"
   [[ -n "$TUNNEL_TOKEN" && "$TUNNEL_TOKEN" != null ]] || die "Empty tunnel token."
@@ -254,7 +254,7 @@ if [[ "${SKIP_CLOUDFLARE:-false}" != true ]]; then
   dns="$(curl --fail --silent --show-error -X POST "${auth[@]}" --data "$dns_payload" "$API/zones/$ZONE_ID/dns_records")" || die "DNS create failed."
   [[ "$(jq -r .success <<<"$dns")" == true ]] || { jq .errors <<<"$dns"; die "DNS creation failed; record may already exist."; }
   ingress="$(jq -n --arg host "$HOSTNAME" '{config:{ingress:[{hostname:$host,service:"http://127.0.0.1:80"},{service:"http_status:404"}]}}')"
-  result="$(curl --fail --silent --show-error -X PUT "${auth[@]}" --data "$ingress" "$API/accounts/$CF_ACCOUNT_ID/cfd_tunnels/$TUNNEL_ID/configurations")" || die "Tunnel ingress update failed."
+  result="$(curl --fail --silent --show-error -X PUT "${auth[@]}" --data "$ingress" "$API/accounts/$CF_ACCOUNT_ID/cfd_tunnel/$TUNNEL_ID/configurations")" || die "Tunnel ingress update failed."
   [[ "$(jq -r .success <<<"$result")" == true ]] || { jq .errors <<<"$result"; die "Tunnel ingress update failed."; }
 
   if [[ ! -x "$CF_BIN" ]]; then
