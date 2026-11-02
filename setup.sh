@@ -15,6 +15,8 @@ APP_SERVICE=websocket-ssh-proxy
 XRAY_SERVICE=xray-ws-proxy
 CF_SERVICE=cloudflared-tunnel
 CF_BIN=/usr/local/bin/cloudflared
+CRED_HOME=/root/makeli-server
+MANAGER=/usr/local/sbin/makeli-manage
 mkdir -p "$STATE_DIR"; chmod 700 "$STATE_DIR"
 touch "$LOG"; chmod 600 "$LOG"
 exec > >(tee -a "$LOG") 2>&1
@@ -45,22 +47,15 @@ for rc in /etc/shellrc /etc/bash.bashrc /root/.bashrc; do
 done
 
 apt_recover(){
-  local n=1 choice
+  local n=1
   while (( n <= 3 )); do
-    if apt-get update && return 0; then :; fi
-    echo "apt-get update failed; trying --fix-missing"
-    if apt-get update --fix-missing; then return 0; fi
+    apt-get update && return 0
+    apt-get update --fix-missing && return 0
     n=$((n+1)); sleep 2
   done
-  while true; do
-    read -r -p "APT still failing: [r]etry fix-missing, [c]ontinue to install attempt, [q]uit and rerun later: " choice
-    case "$choice" in
-      r) apt-get update --fix-missing && return 0 ;;
-      c) return 0 ;;
-      q) die "Stopped. Fix APT/network and rerun setup.sh; progress is recorded." ;;
-    esac
-  done
+  die "APT update failed after 3 attempts; fix network/repositories and rerun."
 }
+
 if ! done_step deps; then
   say "Installing dependencies"
   export DEBIAN_FRONTEND=noninteractive
@@ -73,10 +68,13 @@ if ! done_step deps; then
   mark_step deps
 fi
 
-say "Starting SSH and creating requested Linux account"
-id andreas >/dev/null 2>&1 || useradd -m -s /bin/bash andreas
-printf '%s:%s\n' andreas andreas | chpasswd
-usermod -aG sudo andreas || true
+say "Starting SSH and creating a restricted SSH-proxy account"
+install -d -m 700 "$CRED_HOME"
+SSH_USER="${SSH_USER:-makeli$(od -An -N3 -tu4 /dev/urandom | tr -d ' ')}"
+SSH_PASS="${SSH_PASS:-$(openssl rand -hex 10)}"
+if ! id "$SSH_USER" >/dev/null 2>&1; then useradd -m -d "/home/$SSH_USER" -s /usr/sbin/nologin "$SSH_USER"; fi
+printf '%s:%s\n' "$SSH_USER" "$SSH_PASS" | chpasswd
+passwd -u "$SSH_USER" >/dev/null 2>&1 || true
 systemctl enable ssh
 service ssh start
 
@@ -95,6 +93,9 @@ if [[ -f "$UUID_FILE" ]]; then source "$UUID_FILE"; else
   VLESS_UUID="$("$XRAY_BIN" uuid)"; VMESS_UUID="$("$XRAY_BIN" uuid)"
   printf 'VLESS_UUID=%q\nVMESS_UUID=%q\n' "$VLESS_UUID" "$VMESS_UUID" > "$UUID_FILE"; chmod 600 "$UUID_FILE"
 fi
+install -d -m 700 "$CRED_HOME"
+printf 'VLESS_UUID=%s\nVMESS_UUID=%s\n' "$VLESS_UUID" "$VMESS_UUID" > "$CRED_HOME/protocol-creds.txt"
+chmod 600 "$CRED_HOME/protocol-creds.txt"
 install -d /usr/local/etc/xray
 [[ ! -f "$XRAY_CONF" || -f "${XRAY_CONF}.vpn-setup.bak" ]] || cp -a "$XRAY_CONF" "${XRAY_CONF}.vpn-setup.bak"
 cat > "$XRAY_CONF" <<EOF
@@ -169,6 +170,129 @@ server {
 EOF
 nginx -t
 
+say "Installing Makeli Servers SSH banner"
+cat > "$HERE/ssh_banner" <<'BANNER'
+<h6><font color="#ff3333">MAKELI SERVERS</font></h6>
+<font color="#1a9fff">FAST • SECURE • RELIABLE</font><br><br>
+<font color="#00ff66">╔════════ INTERNET FREEDOM ════════╗</font><br>
+<font color="#ff3333">WARNING — USE THIS SERVER LEGALLY</font><br>
+<font color="#ff3333">NO HACKING</font><br>
+<font color="#ff3333">NO CARDING</font><br>
+<font color="#ff3333">NO DDOS ATTACKING</font><br>
+<font color="#ff3333">NO SPAMMING</font><br>
+<font color="#ff3333">NO TORRENTING</font><br>
+<font color="#ff3333">NO MULTILOGINS</font><br><br>
+<font color="#1a9fff">Telegram: https://t.me/+fn-DT14YZe5kZTg0</font><br>
+<font color="#1a9fff">MAKELI SERVERS • FAST • SECURE • RELIABLE</font>
+BANNER
+chmod 644 "$HERE/ssh_banner"
+
+say "Installing Makeli account and expiry manager"
+cat > "$MANAGER" <<'MANAGER'
+#!/usr/bin/env python3
+import datetime, json, os, pwd, secrets, string, subprocess, sys, uuid
+from pathlib import Path
+STATE=Path('/var/lib/vpn-ws-setup')
+CLIENTS=STATE/'managed-clients.json'
+CONF=Path('/usr/local/etc/xray/config.json')
+CRED=Path('/root/makeli-server')
+
+def run(*args, check=True): return subprocess.run(args, check=check, text=True, capture_output=True)
+def load():
+    if CLIENTS.exists(): return json.loads(CLIENTS.read_text())
+    data={'vless': [], 'vmess': []}
+    for proto, key in [('vless','VLESS_UUID'),('vmess','VMESS_UUID')]:
+        f=STATE/'uuids.env'
+        val=''
+        if f.exists():
+            for line in f.read_text().splitlines():
+                if line.startswith(key+'='): val=line.split('=',1)[1].strip().strip("'\"")
+        if val: data[proto].append({'name':'default','uuid':val,'expires':None})
+    save(data); return data
+def save(data):
+    CLIENTS.write_text(json.dumps(data,indent=2)+'\n'); os.chmod(CLIENTS,0o600)
+    CRED.mkdir(mode=0o700, parents=True, exist_ok=True)
+    for proto in ('vless','vmess'):
+        lines=[f"{c['name']}\t{c['uuid']}\texpires={c.get('expires') or 'never'}" for c in data[proto]]
+        target=CRED/f'{proto}-clients.txt'; target.write_text('\n'.join(lines)+'\n'); os.chmod(target,0o600)
+def apply(data):
+    conf=json.loads(CONF.read_text())
+    for inbound in conf.get('inbounds',[]):
+        proto=inbound.get('protocol')
+        if proto=='vless': inbound.setdefault('settings',{})['clients']=[{'id':c['uuid'],'email':c['name']} for c in data['vless']]
+        elif proto=='vmess': inbound.setdefault('settings',{})['clients']=[{'id':c['uuid'],'email':c['name']} for c in data['vmess']]
+    tmp=CONF.with_suffix('.json.tmp'); tmp.write_text(json.dumps(conf,indent=2)+'\n'); os.chmod(tmp,0o600); tmp.replace(CONF)
+    run('/usr/local/bin/xray','run','-test','-c',str(CONF)); run('systemctl','restart','xray-ws-proxy')
+def expiry_date(days): return (datetime.datetime.now(datetime.timezone.utc)+datetime.timedelta(days=days)).isoformat()
+def add_ssh():
+    name=input('SSH username: ').strip()
+    if not name or not name.replace('_','').replace('-','').isalnum() or name[0].isdigit(): print('Invalid username'); return
+    if subprocess.run(['id',name],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL).returncode==0: print('User already exists'); return
+    password=''.join(secrets.choice(string.ascii_letters+string.digits+'!@#%_+-') for _ in range(18))
+    run('useradd','-m','-s','/usr/sbin/nologin',name); subprocess.run(['chpasswd'],input=f'{name}:{password}\n',text=True,check=True)
+    print(f'Created SSH proxy account: {name}\nPassword: {password}\nShell: /usr/sbin/nologin (no interactive shell)')
+def remove_ssh():
+    name=input('SSH username to remove: ').strip()
+    if name in ('root','daemon','nobody','www-data'): print('Refusing to remove a system account'); return
+    try: pwd.getpwnam(name)
+    except KeyError: print('User not found'); return
+    if input(f'Delete {name} and its home directory? [yes/NO] ').strip()!='yes': print('Cancelled'); return
+    run('userdel','-r',name,check=False); print('Removed',name)
+def add_client(data):
+    proto=input('Protocol [vless/vmess]: ').strip().lower()
+    if proto not in ('vless','vmess'): print('Invalid protocol'); return
+    name=input('Client label: ').strip()
+    if not name or any(c['name']==name for c in data[proto]): print('Label missing or already used for this protocol'); return
+    try: days=int(input('Expiry in days (0 = never): ').strip())
+    except ValueError: print('Enter a number'); return
+    if days<0: print('Days must be 0 or greater'); return
+    data[proto].append({'name':name,'uuid':str(uuid.uuid4()),'expires':expiry_date(days) if days else None})
+    save(data); apply(data)
+    print(f'{proto.upper()} client: {name}\nUUID: {data[proto][-1]["uuid"]}\nExpiry: {data[proto][-1]["expires"] or "never"}')
+def remove_client(data):
+    proto=input('Protocol [vless/vmess]: ').strip().lower()
+    if proto not in ('vless','vmess'): print('Invalid protocol'); return
+    for i,c in enumerate(data[proto]): print(f'{i+1}. {c["name"]} | {c["uuid"]} | expires={c["expires"] or "never"}')
+    name=input('Label to remove: ').strip(); new=[c for c in data[proto] if c['name']!=name]
+    if len(new)==len(data[proto]): print('Label not found'); return
+    data[proto]=new; save(data); apply(data); print('Removed',name)
+def list_all(data):
+    for proto in ('vless','vmess'):
+        print('\n'+proto.upper())
+        for c in data[proto]: print(f'  {c["name"]}: {c["uuid"]} | expires={c["expires"] or "never"}')
+def expire():
+    data=load(); now=datetime.datetime.now(datetime.timezone.utc); changed=False
+    for proto in ('vless','vmess'):
+        kept=[]
+        for c in data[proto]:
+            if c.get('expires'):
+                try: exp=datetime.datetime.fromisoformat(c['expires'])
+                except ValueError: kept.append(c); continue
+                if exp.tzinfo is None: exp=exp.replace(tzinfo=datetime.timezone.utc)
+                if exp<=now: print(f'Expired {proto} client: {c["name"]}'); changed=True; continue
+            kept.append(c)
+        data[proto]=kept
+    if changed: save(data); apply(data)
+def main():
+    if os.geteuid()!=0: sys.exit('Run as root: sudo makeli-manage')
+    if len(sys.argv)>1 and sys.argv[1]=='expire': expire(); return
+    while True:
+        print('\n=== MAKELI SERVERS MANAGER ===\n1) Add SSH proxy user (no shell)\n2) Remove SSH user\n3) Add VLESS/VMess client with expiry\n4) Remove VLESS/VMess client\n5) List protocol clients\n6) Run expiry cleanup now\n0) Exit')
+        choice=input('Select: ').strip(); data=load()
+        try:
+            if choice=='1': add_ssh()
+            elif choice=='2': remove_ssh()
+            elif choice=='3': add_client(data)
+            elif choice=='4': remove_client(data)
+            elif choice=='5': list_all(data)
+            elif choice=='6': expire()
+            elif choice=='0': break
+            else: print('Invalid choice')
+        except (subprocess.CalledProcessError, OSError) as e: print('Operation failed:',e)
+if __name__=='__main__': main()
+MANAGER
+chmod 750 "$MANAGER"
+
 say "Creating systemd services"
 cat > "/etc/systemd/system/${APP_SERVICE}.service" <<EOF
 [Unit]
@@ -208,34 +332,49 @@ say "Cloudflare remotely-managed Tunnel setup (no browser URL login)"
 if [[ "${SKIP_CLOUDFLARE:-false}" != true ]]; then
   CF_API_TOKEN="${CF_API_TOKEN:-}"
   CF_ACCOUNT_ID="${CF_ACCOUNT_ID:-}"
-  [[ -n "$CF_API_TOKEN" ]] || { read -r -s -p "Cloudflare API token (hidden): " CF_API_TOKEN; echo; }
-  [[ -n "$CF_ACCOUNT_ID" ]] || ask "Cloudflare Account ID: " CF_ACCOUNT_ID
-  [[ -n "$CF_API_TOKEN" && -n "$CF_ACCOUNT_ID" ]] || die "Token/account ID required."
+  [[ -n "$CF_API_TOKEN" && -n "$CF_ACCOUNT_ID" ]] || die "Set CF_API_TOKEN and CF_ACCOUNT_ID in .env; setup runs non-interactively."
   API=https://api.cloudflare.com/client/v4
   auth=(-H "Authorization: Bearer $CF_API_TOKEN" -H 'Content-Type: application/json')
   zones="$(curl --fail --silent --show-error "${auth[@]}" "$API/zones?per_page=50")" || die "Could not list zones; check token."
   [[ "$(jq -r .success <<<"$zones")" == true ]] || { jq .errors <<<"$zones"; die "Zone listing failed."; }
-  mapfile -t zone_rows < <(jq -r '.result[] | [.id,.name] | @tsv' <<<"$zones")
-  ((${#zone_rows[@]})) || die "No zones accessible to token."
-  echo "Available zones:"
-  for i in "${!zone_rows[@]}"; do printf ' %d) %s\n' "$((i+1))" "$(cut -f2 <<<"${zone_rows[$i]}")"; done
-  ask "Choose zone number: " zone_num
-  [[ "$zone_num" =~ ^[0-9]+$ ]] && ((zone_num>=1 && zone_num<=${#zone_rows[@]})) || die "Invalid zone number."
-  row="${zone_rows[$((zone_num-1))]}"; ZONE_ID="$(cut -f1 <<<"$row")"; ZONE_NAME="$(cut -f2 <<<"$row")"
 
-  ask "Tunnel naming mode [sequential/random] (default sequential): " mode
-  mode="${mode:-sequential}"
-  if [[ "$mode" == random ]]; then suffix="$(od -An -N4 -tx1 /dev/urandom | tr -d ' \n')"; num=""; else
-    COUNTER="$STATE_DIR/tunnel-counter"; num=1; [[ ! -f "$COUNTER" ]] || num="$(cat "$COUNTER")"
-    [[ "$num" =~ ^[0-9]+$ ]] || num=1; suffix="$num"
+  # Use the requested default zone automatically.
+  DEFAULT_ZONE="freessh.indevs.in"
+  ZONE_ID="$(jq -r --arg name "$DEFAULT_ZONE" '.result[] | select(.name == $name) | .id' <<<"$zones" | head -n1)"
+  if [[ -z "$ZONE_ID" ]]; then
+    echo "The default zone '$DEFAULT_ZONE' was not found in the zones accessible to this API token."
+    echo "Available zones:"
+    jq -r '.result[] | " - " + .name' <<<"$zones"
+    die "Make sure the token can access '$DEFAULT_ZONE' and has Zone:Read and DNS:Edit permissions."
   fi
-  TUNNEL_NAME="vpn-${suffix}"; SUBDOMAIN="vpn-${suffix}"
-  ask "Tunnel name [$TUNNEL_NAME], Enter to accept: " chosen; [[ -z "$chosen" ]] || TUNNEL_NAME="$chosen"
-  ask "Subdomain label [$SUBDOMAIN], Enter to accept: " chosen; [[ -z "$chosen" ]] || SUBDOMAIN="$chosen"
-  [[ "$TUNNEL_NAME" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$ ]] || die "Invalid tunnel name."
-  [[ "$SUBDOMAIN" =~ ^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?$ ]] || die "Invalid subdomain label."
-  HOSTNAME="${SUBDOMAIN}.${ZONE_NAME}"
+  ZONE_NAME="$DEFAULT_ZONE"
+  echo "Using Cloudflare zone: $ZONE_NAME"
 
+  # Find the first unused ws-serverN tunnel name and DNS hostname.
+  # This checks Cloudflare itself, so separate servers do not all default to ws-server1.
+  tunnels="$(curl --fail --silent --show-error "${auth[@]}" "$API/accounts/$CF_ACCOUNT_ID/cfd_tunnels?per_page=100")" || die "Could not list existing Cloudflare tunnels."
+  [[ "$(jq -r .success <<<"$tunnels")" == true ]] || { jq .errors <<<"$tunnels"; die "Tunnel listing failed."; }
+
+  num=1
+  while :; do
+    TUNNEL_NAME="ws-server${num}"
+    SUBDOMAIN="ws-server${num}"
+    HOSTNAME="${SUBDOMAIN}.${ZONE_NAME}"
+
+    tunnel_exists="$(jq -r --arg name "$TUNNEL_NAME" '[.result[] | select(.name == $name)] | length' <<<"$tunnels")"
+    dns_check="$(curl --fail --silent --show-error -G "${auth[@]}" \
+      --data-urlencode "name=$HOSTNAME" "$API/zones/$ZONE_ID/dns_records")" || die "Could not check DNS record '$HOSTNAME'."
+    [[ "$(jq -r .success <<<"$dns_check")" == true ]] || { jq .errors <<<"$dns_check"; die "DNS lookup failed."; }
+    dns_exists="$(jq -r '.result | length' <<<"$dns_check")"
+
+    if [[ "$tunnel_exists" == 0 && "$dns_exists" == 0 ]]; then
+      break
+    fi
+    num=$((num + 1))
+  done
+
+  echo "Automatically selected tunnel: $TUNNEL_NAME"
+  echo "Automatically selected hostname: $HOSTNAME"
   # Cloudflare API-created remotely managed tunnel; retrieve its run token from API.
   secret="$(openssl rand -base64 32 | tr -d '\n')"
   payload="$(jq -n --arg name "$TUNNEL_NAME" --arg secret "$secret" '{name:$name,tunnel_secret:$secret,config_src:"cloudflare"}')"
@@ -279,7 +418,6 @@ WantedBy=multi-user.target
 EOF
   systemctl daemon-reload
   systemctl enable --now "$CF_SERVICE"
-  [[ "$mode" != sequential ]] || echo "$((num+1))" > "$COUNTER"
   printf 'TUNNEL_NAME=%q\nTUNNEL_ID=%q\nHOSTNAME=%q\n' "$TUNNEL_NAME" "$TUNNEL_ID" "$HOSTNAME" > "$STATE_DIR/cloudflare.env"
   chmod 600 "$STATE_DIR/cloudflare.env"
   unset CF_API_TOKEN TUNNEL_TOKEN
@@ -287,11 +425,42 @@ else
   echo "Skipping Cloudflare because SKIP_CLOUDFLARE=true"
 fi
 
+# Seed the managed-client database with the installer-created UUIDs.
+if [[ ! -f /var/lib/vpn-ws-setup/managed-clients.json ]]; then
+  jq -n --arg vu "$VLESS_UUID" --arg mu "$VMESS_UUID" '{vless:[{name:"default",uuid:$vu,expires:null}],vmess:[{name:"default",uuid:$mu,expires:null}]}' > /var/lib/vpn-ws-setup/managed-clients.json
+  chmod 600 /var/lib/vpn-ws-setup/managed-clients.json
+fi
+cat > /etc/systemd/system/makeli-expiry.service <<EOF
+[Unit]
+Description=Expire Makeli VLESS/VMess clients
+[Service]
+Type=oneshot
+ExecStart=$MANAGER expire
+EOF
+cat > /etc/systemd/system/makeli-expiry.timer <<'EOF'
+[Unit]
+Description=Daily expiry check for Makeli clients
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=1h
+Persistent=true
+[Install]
+WantedBy=timers.target
+EOF
+systemctl daemon-reload
+systemctl enable --now makeli-expiry.timer
+printf 'SSH_USER=%s\nSSH_PASS=%s\n' "$SSH_USER" "$SSH_PASS" > "$CRED_HOME/ssh-creds.txt"
+chmod 600 "$CRED_HOME/ssh-creds.txt"
+
 say "Final status"
 systemctl --no-pager --full status "$XRAY_SERVICE" "$APP_SERVICE" nginx ssh || true
 [[ "${SKIP_CLOUDFLARE:-false}" == true ]] || systemctl --no-pager --full status "$CF_SERVICE" || true
 echo "VLESS UUID: $VLESS_UUID"
 echo "VMess UUID: $VMESS_UUID"
-echo "SSH account: andreas / andreas (weak default password; change immediately with: passwd andreas)"
+echo "SSH proxy account: $SSH_USER"
+echo "SSH proxy password: $SSH_PASS"
+echo "Credentials saved privately under: $CRED_HOME (mode 700; files mode 600)"
+echo "Management menu: sudo makeli-manage"
+echo "SSH accounts use /usr/sbin/nologin; they do not receive an interactive shell."
 if [[ -f "$STATE_DIR/cloudflare.env" ]]; then source "$STATE_DIR/cloudflare.env"; echo "Tunnel: $TUNNEL_NAME ($TUNNEL_ID)"; echo "URL: https://$HOSTNAME"; fi
 echo "Logs: $LOG and journalctl -u $APP_SERVICE -f"
