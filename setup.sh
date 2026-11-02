@@ -352,7 +352,7 @@ if [[ "${SKIP_CLOUDFLARE:-false}" != true ]]; then
 
   # Find the first unused ws-serverN tunnel name and DNS hostname.
   # This checks Cloudflare itself, so separate servers do not all default to ws-server1.
-  tunnels="$(curl --fail --silent --show-error "${auth[@]}" "$API/accounts/$CF_ACCOUNT_ID/cfd_tunnels?per_page=100")" || die "Could not list existing Cloudflare tunnels."
+  tunnels="$(curl --fail --silent --show-error "${auth[@]}" "$API/accounts/$CF_ACCOUNT_ID/cfd_tunnel?per_page=100")" || die "Could not list existing Cloudflare tunnels."
   [[ "$(jq -r .success <<<"$tunnels")" == true ]] || { jq .errors <<<"$tunnels"; die "Tunnel listing failed."; }
 
   num=1
